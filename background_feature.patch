@@ -1,0 +1,142 @@
+diff --git a/packages/cli/src/ui/components/ShellInputPrompt.tsx b/packages/cli/src/ui/components/ShellInputPrompt.tsx
+index 5cdafff00..23017190c 100644
+--- a/packages/cli/src/ui/components/ShellInputPrompt.tsx
++++ b/packages/cli/src/ui/components/ShellInputPrompt.tsx
+@@ -43,6 +43,11 @@ export const ShellInputPrompt: React.FC<ShellInputPromptProps> = ({
+         return;
+       }
+ 
++      if (key.ctrl && key.name === 'b') {
++        ShellExecutionService.detach(activeShellPtyId);
++        return;
++      }
++
+       const ansiSequence = keyToAnsi(key);
+       if (ansiSequence) {
+         handleShellInputSubmit(ansiSequence);
+diff --git a/packages/core/src/services/shellExecutionService.test.ts b/packages/core/src/services/shellExecutionService.test.ts
+index 4061ed5b8..2fde24b9d 100644
+--- a/packages/core/src/services/shellExecutionService.test.ts
++++ b/packages/core/src/services/shellExecutionService.test.ts
+@@ -417,6 +417,7 @@ describe('ShellExecutionService', () => {
+         ptyProcess: mockPtyProcess as any,
+         // eslint-disable-next-line @typescript-eslint/no-explicit-any
+         headlessTerminal: mockHeadlessTerminal as any,
++        detach: vi.fn(),
+       });
+     });
+ 
+diff --git a/packages/core/src/services/shellExecutionService.ts b/packages/core/src/services/shellExecutionService.ts
+index 28f932159..d9a4c8753 100644
+--- a/packages/core/src/services/shellExecutionService.ts
++++ b/packages/core/src/services/shellExecutionService.ts
+@@ -63,6 +63,8 @@ export interface ShellExecutionResult {
+   error: Error | null;
+   /** A boolean indicating if the command was aborted by the user. */
+   aborted: boolean;
++  /** A boolean indicating if the command was backgrounded by the user. */
++  backgrounded?: boolean;
+   /** The process ID of the spawned shell. */
+   pid: number | undefined;
+   /** The method used to execute the shell command. */
+@@ -114,6 +116,7 @@ export type ShellOutputEvent =
+ interface ActivePty {
+   ptyProcess: IPty;
+   headlessTerminal: pkg.Terminal;
++  detach: () => void;
+ }
+ 
+ const getFullBufferText = (terminal: pkg.Terminal): string => {
+@@ -491,7 +494,11 @@ export class ShellExecutionService {
+         });
+         headlessTerminal.scrollToTop();
+ 
+-        this.activePtys.set(ptyProcess.pid, { ptyProcess, headlessTerminal });
++        this.activePtys.set(ptyProcess.pid, {
++          ptyProcess,
++          headlessTerminal,
++          detach: () => {},
++        });
+ 
+         let processingChain = Promise.resolve();
+         let decoder: TextDecoder | null = null;
+@@ -725,6 +732,29 @@ export class ShellExecutionService {
+         };
+ 
+         abortSignal.addEventListener('abort', abortHandler, { once: true });
++
++        const activePty = this.activePtys.get(ptyProcess.pid);
++        if (activePty) {
++          activePty.detach = () => {
++            exited = true;
++            abortSignal.removeEventListener('abort', abortHandler);
++            this.activePtys.delete(ptyProcess.pid);
++
++            const finalBuffer = Buffer.concat(outputChunks);
++
++            resolve({
++              rawOutput: finalBuffer,
++              output: getFullBufferText(headlessTerminal),
++              exitCode: null,
++              signal: null,
++              error: null,
++              aborted: false,
++              pid: ptyProcess.pid,
++              executionMethod: ptyInfo?.name ?? 'node-pty',
++              backgrounded: true,
++            });
++          };
++        }
+       });
+ 
+       return { pid: ptyProcess.pid, result };
+@@ -848,4 +878,20 @@ export class ShellExecutionService {
+       }
+     }
+   }
++
++  /**
++   * Detaches the pseudo-terminal (PTY) of a running process, allowing it to run in the background.
++   *
++   * @param pid The process ID of the target PTY.
++   */
++  static detach(pid: number): void {
++    if (!this.isPtyActive(pid)) {
++      return;
++    }
++
++    const activePty = this.activePtys.get(pid);
++    if (activePty) {
++      activePty.detach();
++    }
++  }
+ }
+diff --git a/packages/core/src/tools/shell.ts b/packages/core/src/tools/shell.ts
+index 9103480c5..f448f3601 100644
+--- a/packages/core/src/tools/shell.ts
++++ b/packages/core/src/tools/shell.ts
+@@ -302,7 +302,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
+ 
+       let llmContent = '';
+       let timeoutMessage = '';
+-      if (result.aborted) {
++      if (result.backgrounded) {
++        llmContent = `Command backgrounded by user. The process (PID: ${result.pid}) is still running.`;
++        if (result.output.trim()) {
++          llmContent += `\nOutput so far:\n${result.output}`;
++        }
++      } else if (result.aborted) {
+         if (timeoutController.signal.aborted) {
+           timeoutMessage = `Command was automatically cancelled because it exceeded the timeout of ${(
+             timeoutMs / 60000
+@@ -345,7 +350,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
+         if (result.output.trim()) {
+           returnDisplayMessage = result.output;
+         } else {
+-          if (result.aborted) {
++          if (result.backgrounded) {
++            returnDisplayMessage = `Command backgrounded (PID: ${result.pid}).`;
++          } else if (result.aborted) {
+             if (timeoutMessage) {
+               returnDisplayMessage = timeoutMessage;
+             } else {
