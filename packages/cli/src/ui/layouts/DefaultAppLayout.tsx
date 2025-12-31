@@ -15,6 +15,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useFlickerDetector } from '../hooks/useFlickerDetector.js';
 import { useAlternateBuffer } from '../hooks/useAlternateBuffer.js';
 import { CopyModeWarning } from '../components/CopyModeWarning.js';
+import { ShellBackgroundHandler } from '../components/ShellBackgroundHandler.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -37,6 +38,7 @@ export const DefaultAppLayout: React.FC = () => {
       overflow="hidden"
       ref={uiState.rootUiRef}
     >
+      <ShellBackgroundHandler activePid={uiState.activeShellPid} />
       <MainContent />
 
       <Box
